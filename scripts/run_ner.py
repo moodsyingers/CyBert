@@ -1,8 +1,12 @@
 """Test NER with complete word extraction"""
 
+import os
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 
-MODEL_PATH = r"e:\project\shiley-project\models\mini_cybert_final"
+# Get the project root directory (parent of scripts folder)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "mini_cybert_final")
 
 def extract_entities(text):
     """Extract cybersecurity entities from text

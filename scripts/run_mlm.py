@@ -3,9 +3,13 @@ MLM Model - Fill-Mask Script
 Use this to predict masked words in cybersecurity text
 """
 
+import os
 from transformers import pipeline, AutoTokenizer, AutoModelForMaskedLM
 
-MODEL_PATH = r"e:\project\shiley-project\models\mlm_final"
+# Get the project root directory (parent of scripts folder)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "mlm_final")
 
 def predict_mask(text):
     """Predict the [MASK] token in the given text"""
