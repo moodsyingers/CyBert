@@ -119,11 +119,20 @@ def extract_entities(text, tokenizer, model):
 
     per_sentence = []
     combined = []
+    seen_spans = set()  # global (start, end) so each span appears only once
 
     for sent_text, sent_start in sentences_with_offsets:
         seg_entities = extract_entities_from_segment(sent_text, tokenizer, model)
-        # Global offsets for combined list
+        seg_unique = []
         for e in seg_entities:
+            g_start = sent_start + e['start']
+            g_end = sent_start + e['end']
+            key = (g_start, g_end)
+            if key in seen_spans:
+                continue
+            seen_spans.add(key)
+            seg_unique.append(e)
+        for e in seg_unique:
             combined.append({
                 'word': e['word'],
                 'type': e['type'],
@@ -133,7 +142,7 @@ def extract_entities(text, tokenizer, model):
         per_sentence.append({
             'sentence': sent_text,
             'start_offset': sent_start,
-            'entities': [{'word': e['word'], 'type': e['type']} for e in seg_entities],
+            'entities': [{'word': e['word'], 'type': e['type']} for e in seg_unique],
         })
 
     return per_sentence, combined

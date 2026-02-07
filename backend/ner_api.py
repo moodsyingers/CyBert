@@ -1,17 +1,22 @@
 """
 Flask Backend API for Mini-CyBERT Models (NER + MLM)
-Provides cybersecurity entity recognition and masked language modeling
+Provides cybersecurity entity recognition and masked language modeling.
+Long text is split into sentences; NER runs per sentence (sliding window if >512 tokens), then results are combined.
 """
 
+import re
+from pathlib import Path
+from collections import Counter
+
+import torch
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from transformers import (
-    pipeline, 
-    AutoTokenizer, 
+    pipeline,
+    AutoTokenizer,
     AutoModelForTokenClassification,
-    AutoModelForMaskedLM
+    AutoModelForMaskedLM,
 )
-from pathlib import Path
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend
@@ -21,6 +26,11 @@ BASE_DIR = Path(__file__).parent.parent
 NER_MODEL_PATH = BASE_DIR / "models" / "mini_cybert_final"
 MLM_MODEL_PATH = BASE_DIR / "models" / "mlm_final"
 
+# Model max length (BERT limit)
+NER_MAX_LENGTH = 512
+# Sliding window stride when a segment exceeds NER_MAX_LENGTH tokens
+NER_WINDOW_STRIDE = 256
+
 # Global model variables
 ner_pipeline = None
 mlm_pipeline = None
@@ -28,6 +38,203 @@ ner_tokenizer = None
 ner_model = None
 ner_loaded = False
 mlm_loaded = False
+
+
+def split_into_sentences(text):
+    """Split text into sentences; return list of (sentence_text, start_offset_in_original)."""
+    if not text or not text.strip():
+        return []
+    text = text.strip()
+    pattern = r'(?<=[.!?])\s+'
+    parts = re.split(pattern, text)
+    result = []
+    current = 0
+    for p in parts:
+        s = p.strip()
+        if not s:
+            continue
+        idx = text.find(s, current)
+        if idx == -1:
+            idx = current
+        result.append((s, idx))
+        current = idx + len(s)
+    return result
+
+
+def _is_token_char(char):
+    valid_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:/')
+    return char in valid_chars
+
+
+def _build_words(segment_text):
+    """Build list of words with character spans; each word has 'labels': []."""
+    words = []
+    i = 0
+    while i < len(segment_text):
+        if _is_token_char(segment_text[i]):
+            start = i
+            while i < len(segment_text) and _is_token_char(segment_text[i]):
+                i += 1
+            words.append({'text': segment_text[start:i], 'start': start, 'end': i, 'labels': []})
+        else:
+            i += 1
+    return words
+
+
+def _words_to_entities(words):
+    """Convert words (with labels filled) to entity list; one unique entity per word (dominant type)."""
+    entities = []
+    for word in words:
+        if not word['labels']:
+            continue
+        non_o_labels = [l for l in word['labels'] if l != 'O']
+        if not non_o_labels:
+            continue
+        entity_types = [lbl.split('-')[-1] if '-' in lbl else lbl for lbl in non_o_labels]
+        dominant_type = Counter(entity_types).most_common(1)[0][0]
+        entities.append({
+            'word': word['text'],
+            'entity_type': dominant_type,
+            'start': word['start'],
+            'end': word['end'],
+        })
+    return entities
+
+
+def _assign_labels_to_words(words, offset_mapping, predictions, model):
+    """Assign token-level predictions to words using offset_mapping (segment-relative)."""
+    for idx in range(1, len(predictions) - 1):
+        pred_id = predictions[idx]
+        label = model.config.id2label[pred_id]
+        char_start, char_end = offset_mapping[idx]
+        if char_start == char_end:
+            continue
+        token_mid = (char_start + char_end) // 2
+        for word in words:
+            if word['start'] <= token_mid < word['end']:
+                word['labels'].append(label)
+                break
+
+
+def extract_entities_from_segment_sliding_window(segment_text, tokenizer, model):
+    """Run NER on a long segment using overlapping token windows. No truncation."""
+    enc = tokenizer(
+        segment_text,
+        return_offsets_mapping=True,
+        truncation=False,
+        add_special_tokens=True,
+    )
+    input_ids_list = enc['input_ids']
+    offset_mapping = enc['offset_mapping']
+    n_content = len(input_ids_list) - 2
+
+    if n_content <= 0:
+        return []
+
+    words = _build_words(segment_text)
+    if not words:
+        return []
+
+    for start in range(0, n_content, NER_WINDOW_STRIDE):
+        end = min(start + NER_MAX_LENGTH, n_content)
+        window_ids = (
+            [input_ids_list[0]]
+            + input_ids_list[1 + start : 1 + end]
+            + [input_ids_list[-1]]
+        )
+        inputs = {
+            'input_ids': torch.tensor([window_ids], dtype=torch.long),
+            'attention_mask': torch.ones(1, len(window_ids), dtype=torch.long),
+        }
+        with torch.no_grad():
+            logits = model(**inputs).logits
+        preds = logits.argmax(dim=-1)[0][1:-1].tolist()
+
+        for i in range(end - start):
+            content_idx = start + i
+            char_start, char_end = offset_mapping[1 + content_idx]
+            if char_start == char_end:
+                continue
+            label = model.config.id2label[preds[i]]
+            token_mid = (char_start + char_end) // 2
+            for word in words:
+                if word['start'] <= token_mid < word['end']:
+                    word['labels'].append(label)
+                    break
+
+    return _words_to_entities(words)
+
+
+def extract_entities_from_segment(segment_text, tokenizer, model):
+    """Run NER on one segment. Uses sliding window if segment exceeds NER_MAX_LENGTH tokens."""
+    enc = tokenizer(
+        segment_text,
+        return_offsets_mapping=True,
+        truncation=False,
+        add_special_tokens=True,
+    )
+    n_tokens = len(enc['input_ids'])
+
+    if n_tokens > NER_MAX_LENGTH + 2:
+        return extract_entities_from_segment_sliding_window(segment_text, tokenizer, model)
+
+    inputs = tokenizer(
+        segment_text,
+        return_tensors="pt",
+        return_offsets_mapping=True,
+        truncation=True,
+        max_length=NER_MAX_LENGTH,
+    )
+    offset_mapping = inputs.pop('offset_mapping')[0].tolist()
+    predictions = model(**inputs).logits.argmax(dim=-1)[0].tolist()
+
+    words = _build_words(segment_text)
+    _assign_labels_to_words(words, offset_mapping, predictions, model)
+    return _words_to_entities(words)
+
+
+def run_ner_on_text(text, tokenizer, model):
+    """
+    Split text into sentences, run NER on each, combine with global offsets.
+    Returns (per_sentence_list, combined_entities).
+    """
+    sentences_with_offsets = split_into_sentences(text)
+    if not sentences_with_offsets:
+        sentences_with_offsets = [(text.strip(), 0)] if text.strip() else []
+
+    per_sentence = []
+    combined = []
+
+    seen_spans = set()  # global (start, end) to avoid duplicate entities in combined
+
+    for sent_text, sent_start in sentences_with_offsets:
+        seg_entities = extract_entities_from_segment(sent_text, tokenizer, model)
+        seg_unique = []
+        for e in seg_entities:
+            g_start = sent_start + e['start']
+            g_end = sent_start + e['end']
+            key = (g_start, g_end)
+            if key in seen_spans:
+                continue
+            seen_spans.add(key)
+            seg_unique.append(e)
+        for e in seg_unique:
+            combined.append({
+                'word': e['word'],
+                'entity_type': e['entity_type'],
+                'start': sent_start + e['start'],
+                'end': sent_start + e['end'],
+            })
+        per_sentence.append({
+            'sentence': sent_text,
+            'start_offset': sent_start,
+            'entities': [
+                {'word': e['word'], 'entity_type': e['entity_type'], 'start': e['start'], 'end': e['end']}
+                for e in seg_unique
+            ],
+        })
+
+    return per_sentence, combined
 
 
 def load_models():
@@ -75,103 +282,27 @@ def health_check():
 
 @app.route('/api/ner/analyze', methods=['POST'])
 def analyze_ner():
-    """Analyze text and extract cybersecurity entities"""
+    """Analyze text: split into sentences, run NER per sentence, return per-sentence + combined entities."""
     try:
         if not ner_loaded:
             return jsonify({'error': 'NER model not loaded'}), 500
-        
+
         data = request.json
         text = data.get('text', '')
-        
+
         if not text:
             return jsonify({'error': 'No text provided'}), 400
-        
-        # Tokenize with offset mapping to track character positions
-        inputs = ner_tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
-        offset_mapping = inputs.pop('offset_mapping')[0].tolist()
-        
-        # Get predictions
-        outputs = ner_model(**inputs)
-        predictions = outputs.logits.argmax(dim=-1)[0].tolist()
-        
-        # Helper function to check if character is part of a token
-        def is_token_char(char):
-            """Check if character is part of a cybersecurity token"""
-            valid_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:/')
-            return char in valid_chars
-        
-        # Step 1: Extract ALL meaningful words from the text
-        words = []
-        i = 0
-        while i < len(text):
-            if is_token_char(text[i]):
-                # Found start of a word
-                start = i
-                while i < len(text) and is_token_char(text[i]):
-                    i += 1
-                word_text = text[start:i]
-                words.append({
-                    'text': word_text,
-                    'start': start,
-                    'end': i,
-                    'labels': []  # Will collect all labels for tokens in this word
-                })
-            else:
-                i += 1
-        
-        # Step 2: Map each token prediction to its corresponding word
-        for idx in range(1, len(predictions) - 1):  # Skip [CLS] and [SEP]
-            pred_id = predictions[idx]
-            label = ner_model.config.id2label[pred_id]
-            char_start, char_end = offset_mapping[idx]
-            
-            # Skip special tokens with (0, 0) offsets
-            if char_start == char_end:
-                continue
-            
-            # Find which word this token belongs to
-            token_mid = (char_start + char_end) // 2
-            for word in words:
-                if word['start'] <= token_mid < word['end']:
-                    word['labels'].append(label)
-                    break
-        
-        # Step 3: Assign dominant label to each word
-        from collections import Counter
-        
-        entities = []
-        for word in words:
-            if not word['labels']:
-                continue
-            
-            # Get most common non-O label, or skip if all are O
-            non_o_labels = [l for l in word['labels'] if l != 'O']
-            if non_o_labels:
-                # Remove B-/I- prefixes to get entity types
-                entity_types = []
-                for lbl in non_o_labels:
-                    entity_type = lbl.split('-')[-1] if '-' in lbl else lbl
-                    entity_types.append(entity_type)
-                
-                # Get most common entity type
-                dominant_label = Counter(entity_types).most_common(1)[0][0]
-                
-                # Add to entities list
-                entities.append({
-                    'word': word['text'],
-                    'entity_type': dominant_label,
-                    'start': word['start'],
-                    'end': word['end']
-                })
-        
+
+        per_sentence, combined = run_ner_on_text(text, ner_tokenizer, ner_model)
+
         response = {
             'text': text,
-            'entities': entities,
-            'entity_count': len(entities)
+            'sentences': per_sentence,
+            'entities': combined,
+            'entity_count': len(combined),
         }
-        
         return jsonify(response)
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -193,11 +324,23 @@ def predict_mlm():
         if '[MASK]' not in text and '<mask>' not in text:
             return jsonify({'error': 'Text must contain [MASK] or <mask> token'}), 400
         
-        # Perform fill-mask
-        results = mlm_pipeline(text)
+        # Perform fill-mask; get more candidates to filter out single-char tokens
+        results = mlm_pipeline(text, top_k=20)
         
-        # Extract top 5 predictions
-        predictions = [result['token_str'].strip() for result in results[:5]]
+        # Keep only word-like predictions (length >= 2, has at least one letter)
+        def is_word_like(s):
+            t = (s or '').strip()
+            return len(t) >= 2 and any(c.isalpha() for c in t)
+        word_like = [r['token_str'].strip() for r in results if is_word_like(r['token_str'])]
+        seen = set()
+        unique = []
+        for w in word_like:
+            if w not in seen:
+                seen.add(w)
+                unique.append(w)
+        predictions = unique[:5]
+        if not predictions:
+            predictions = [r['token_str'].strip() for r in results[:3]]
         
         response = {
             'text': text,

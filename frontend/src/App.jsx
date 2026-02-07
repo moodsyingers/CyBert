@@ -158,9 +158,31 @@ function App() {
             {result && (
               <div className="results-section">
                 {selectedModel === 'ner' ? (
-                  // NER Results
+                  // NER Results (long text split into sentences, then combined)
                   <>
-                    <h3>Detected Entities ({result.entity_count})</h3>
+                    {result.sentences && result.sentences.length > 1 && (
+                      <div className="sentences-breakdown">
+                        <h4>By sentence ({result.sentences.length} sentences)</h4>
+                        {result.sentences.map((sent, idx) => (
+                          <div key={idx} className="sentence-block">
+                            <span className="sentence-label">Sentence {idx + 1}:</span>
+                            <span className="sentence-text">{sent.sentence.length > 100 ? sent.sentence.slice(0, 100) + '...' : sent.sentence}</span>
+                            {sent.entities && sent.entities.length > 0 ? (
+                              <div className="sentence-entities">
+                                {sent.entities.map((e, i) => (
+                                  <span key={i} className="sentence-entity-tag" style={{ backgroundColor: getEntityColor(e.entity_type) + '40' }}>
+                                    {e.word} ({e.entity_type})
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="no-entities">No entities</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <h3>Combined entities ({result.entity_count})</h3>
                     {result.entities && result.entities.length > 0 ? (
                       <div className="entities-grid">
                         {result.entities.map((entity, index) => (

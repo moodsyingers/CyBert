@@ -4,6 +4,7 @@ import './NERAnalyzer.css';
 const NERAnalyzer = () => {
   const [text, setText] = useState('');
   const [entities, setEntities] = useState([]);
+  const [sentences, setSentences] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -18,6 +19,7 @@ const NERAnalyzer = () => {
     setLoading(true);
     setError('');
     setEntities([]);
+    setSentences([]);
 
     try {
       const response = await fetch(`${API_URL}/api/ner/analyze`, {
@@ -33,7 +35,8 @@ const NERAnalyzer = () => {
       }
 
       const data = await response.json();
-      setEntities(data.entities);
+      setEntities(data.entities || []);
+      setSentences(data.sentences || []);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -83,9 +86,31 @@ const NERAnalyzer = () => {
           </div>
         )}
 
-        {entities.length > 0 && (
+        {(entities.length > 0 || sentences.length > 0) && (
           <div className="results-section">
-            <h2>Detected Entities ({entities.length})</h2>
+            {sentences.length > 1 && (
+              <div className="sentences-breakdown">
+                <h3>By sentence ({sentences.length} sentences)</h3>
+                {sentences.map((sent, idx) => (
+                  <div key={idx} className="sentence-block">
+                    <span className="sentence-label">Sentence {idx + 1}:</span>
+                    <span className="sentence-text">{sent.sentence.length > 80 ? sent.sentence.slice(0, 80) + '...' : sent.sentence}</span>
+                    {sent.entities && sent.entities.length > 0 ? (
+                      <div className="sentence-entities">
+                        {sent.entities.map((e, i) => (
+                          <span key={i} className="sentence-entity-tag" style={{ backgroundColor: getEntityColor(e.entity_type) + '40' }}>
+                            {e.word} ({e.entity_type})
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="no-entities">No entities</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <h2>Combined entities ({entities.length})</h2>
             
             <div className="entities-list">
               {entities.map((entity, index) => (

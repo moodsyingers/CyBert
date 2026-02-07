@@ -11,8 +11,19 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "mlm_final")
 
-def predict_mask(text):
-    """Predict the [MASK] token in the given text"""
+def is_word_like(token_str):
+    """Filter out single chars and non-word-like tokens (e.g. 'g', 's', 'd')."""
+    s = token_str.strip()
+    if len(s) < 2:
+        return False
+    # Require at least one letter so we skip pure punctuation/numbers
+    if not any(c.isalpha() for c in s):
+        return False
+    return True
+
+
+def predict_mask(text, top_k=20, show=5):
+    """Predict the [MASK] token in the given text. Shows only word-like predictions (no single chars)."""
     print(f"\nInput: {text}")
     
     # Check if mask token is in text, if not, try to replace <mask> with [MASK]
@@ -23,12 +34,25 @@ def predict_mask(text):
             print("WARNING: No [MASK] token found in text!")
             return
 
-    results = fill_mask(text)
+    # Get more candidates so we can filter out single-token / junk predictions
+    results = fill_mask(text, top_k=top_k)
     
-    print("Predictions:")
-    for i, result in enumerate(results[:5], 1):
-        predicted_word = result['token_str'].strip()
+    word_like = [r['token_str'].strip() for r in results if is_word_like(r['token_str'])]
+    # Deduplicate while preserving order (same word can appear multiple times with different scores)
+    seen = set()
+    unique = []
+    for w in word_like:
+        if w not in seen:
+            seen.add(w)
+            unique.append(w)
+    
+    print("Predictions (word-like only):")
+    for i, predicted_word in enumerate(unique[:show], 1):
         print(f"   {i}. {predicted_word}")
+    if not unique:
+        print("   (no word-like predictions; showing raw top 3)")
+        for i, result in enumerate(results[:3], 1):
+            print(f"   {i}. {result['token_str'].strip()}")
     print()
 
 # Load model once
