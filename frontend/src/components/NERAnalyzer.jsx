@@ -46,13 +46,21 @@ const NERAnalyzer = () => {
 
   const getEntityColor = (entityType) => {
     const colors = {
+      APT: '#e03131',
       THREAT_ACTOR: '#ff6b6b',
       MALWARE: '#ee5a6f',
       VULNERABILITY: '#f06595',
-      ATTACK_VECTOR: '#cc5de8',
       TOOL: '#845ef7',
-      SECTOR: '#5c7cfa',
-      LOCATION: '#339af0',
+      EXPLOIT: '#cc5de8',
+      METHOD: '#7950f2',
+      CAMPAIGN: '#5c7cfa',
+      INDICATOR: '#339af0',
+      HASH: '#228be6',
+      IP: '#15aabf',
+      URL: '#12b886',
+      FILE: '#40c057',
+      SOFTWARE: '#82c91e',
+      INFRASTRUCTURE: '#fab005',
     };
     return colors[entityType] || '#868e96';
   };
@@ -167,6 +175,9 @@ const NERAnalyzer = () => {
             </button>
             <button onClick={() => setText('Attackers exploited CVE-2021-44228 (Log4Shell) to gain network access.')}>
               Example 3
+            </button>
+            <button onClick={() => setText('The browser displayed a security warning indicating that the secure sockets layer certificate presented by the website does not match the expected issuer suggesting a man in the middle attack.')}>
+              Example 4 (SSL / man-in-the-middle)
             </button>
           </div>
         </div>

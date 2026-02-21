@@ -1,8 +1,11 @@
 """
 Entity-Level NER Evaluation Script
-Provides proper entity-level metrics instead of token-level accuracy
+Provides proper entity-level metrics instead of token-level accuracy.
+Uses cyber-only label schema; reports cyber entity F1 summary.
 """
 
+import os
+import json
 import pandas as pd
 import numpy as np
 import torch
@@ -12,22 +15,40 @@ from collections import defaultdict
 from seqeval.metrics import classification_report, f1_score, precision_score, recall_score
 from seqeval.scheme import IOB2
 
-# Configuration
-MODEL_PATH = r"e:\project\shiley-project\models\mini_cybert_final"
-CSV_PATH = r"e:\project\shiley-project\datasets\cyber\cyberner_cleaned.csv"
+# Configuration (paths relative to project root)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "mini_cybert_final")
+CSV_PATH = os.path.join(PROJECT_ROOT, "datasets", "cyber", "cyberner_clean.csv")
+SCHEMA_PATH = os.path.join(PROJECT_ROOT, "datasets", "cyber", "ner_cyber_labels.json")
+if not os.path.exists(SCHEMA_PATH):
+    SCHEMA_PATH = os.path.join(PROJECT_ROOT, "config", "ner_cyber_labels.json")
+
+# Core cyber entity types for summary (B- prefix for seqeval report keys)
+CYBER_ENTITY_TYPES = ["APT", "MALWARE", "VULNERABILITY", "TOOL", "EXPLOIT", "THREAT_ACTOR", "METHOD", "CAMPAIGN", "INDICATOR", "HASH", "IP", "URL", "FILE", "SOFTWARE", "INFRASTRUCTURE"]
 
 print("="*80)
 print("ENTITY-LEVEL NER EVALUATION")
 print("="*80)
 print()
 
-# Load model and tokenizer
+# Load model and tokenizer (use model's cyber-only label config)
 print("Loading model and tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 model = AutoModelForTokenClassification.from_pretrained(MODEL_PATH)
 model.eval()
-print("✓ Model loaded")
+label2id = model.config.label2id
+id2label = model.config.id2label
+print("✓ Model loaded (cyber-only labels from config)")
 print()
+
+# Load schema for tag mapping (CSV may have raw 75 tags)
+if os.path.exists(SCHEMA_PATH):
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        schema = json.load(f)
+    tag_mapping = schema.get("tag_mapping", {})
+else:
+    tag_mapping = {}
 
 # Load and prepare dataset
 print("Loading dataset...")
@@ -35,25 +56,23 @@ df = pd.read_csv(CSV_PATH)
 df['Word'] = df['Word'].fillna("#")
 df['Tag'] = df['Tag'].fillna("O")
 
+# Map tags to cyber-only schema (unmapped -> O)
+def map_tag(t):
+    return tag_mapping.get(t, "O")
+df["Tag"] = df["Tag"].apply(map_tag)
+
 # Group by Sentence_ID
 grouped = df.groupby("Sentence_ID").agg({
     "Word": list,
     "Tag": list
 }).reset_index()
 
-# Create label mappings
-unique_labels = sorted(list(set(df["Tag"].unique())))
-label2id = {l: i for i, l in enumerate(unique_labels)}
-id2label = {i: l for i, l in enumerate(unique_labels)}
-label_list = unique_labels
-
-print(f"✓ Loaded {len(grouped)} sentences")
-print(f"✓ Found {len(unique_labels)} unique labels: {unique_labels}")
+print(f"✓ Loaded {len(grouped)} sentences from {os.path.basename(CSV_PATH)}")
 print()
 
-# Convert tags to IDs
+# Convert tags to IDs using model's label2id
 def convert_tags_to_ids(tag_list):
-    return [label2id[t] for t in tag_list]
+    return [label2id.get(t, label2id["O"]) for t in tag_list]
 
 grouped["ner_tags"] = grouped["Tag"].apply(convert_tags_to_ids)
 grouped = grouped.rename(columns={"Word": "tokens"})
@@ -186,6 +205,22 @@ for label in sorted(report.keys()):
 print("-"*80)
 print()
 
+# Cyber entity summary (F1 for core cyber types only)
+print("="*80)
+print("CYBER ENTITY SUMMARY (core security types)")
+print("="*80)
+cyber_keys = [k for k in report if k not in ("micro avg", "macro avg", "weighted avg", "O")
+             and (k.split("-")[-1] if "-" in k else k) in CYBER_ENTITY_TYPES]
+if cyber_keys:
+    for k in sorted(cyber_keys):
+        m = report[k]
+        print(f"  {k:<28} F1={m['f1-score']:.4f}  P={m['precision']:.4f}  R={m['recall']:.4f}  support={int(m['support'])}")
+    cyber_f1_avg = np.mean([report[k]["f1-score"] for k in cyber_keys]) if cyber_keys else 0
+    print(f"  {'(avg cyber types)':<28} F1={cyber_f1_avg:.4f}")
+else:
+    print("  (no cyber entity types in report)")
+print()
+
 # Macro averages
 print("Macro Averages (across all entity types):")
 print(f"  Precision: {report['macro avg']['precision']:.4f}")
@@ -287,7 +322,7 @@ for label in report.keys():
         }
 
 # Save to JSON
-output_path = r"e:\project\shiley-project\evaluation_results.json"
+output_path = os.path.join(PROJECT_ROOT, "evaluation_results.json")
 with open(output_path, 'w') as f:
     json.dump(evaluation_results, f, indent=2)
 

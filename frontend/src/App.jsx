@@ -61,13 +61,21 @@ function App() {
 
   const getEntityColor = (entityType) => {
     const colors = {
+      APT: '#e03131',
       THREAT_ACTOR: '#ff6b6b',
       MALWARE: '#ee5a6f',
       VULNERABILITY: '#f06595',
-      ATTACK_VECTOR: '#cc5de8',
       TOOL: '#845ef7',
-      SECTOR: '#5c7cfa',
-      LOCATION: '#339af0',
+      EXPLOIT: '#cc5de8',
+      METHOD: '#7950f2',
+      CAMPAIGN: '#5c7cfa',
+      INDICATOR: '#339af0',
+      HASH: '#228be6',
+      IP: '#15aabf',
+      URL: '#12b886',
+      FILE: '#40c057',
+      SOFTWARE: '#82c91e',
+      INFRASTRUCTURE: '#fab005',
     };
     return colors[entityType] || '#868e96';
   };
@@ -82,6 +90,7 @@ function App() {
       'The attacker used a [MASK] exploit to gain access.',
       'APT28 deployed [MASK] to steal credentials.',
       'The vulnerability allows remote [MASK] execution.',
+      '... suggesting a [MASK] in the middle attack.',
     ],
   };
 
