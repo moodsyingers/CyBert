@@ -5,6 +5,7 @@ Long text is split into sentences; NER runs per sentence (sliding window if >512
 """
 
 import re
+import json
 from pathlib import Path
 from collections import Counter
 
@@ -25,6 +26,7 @@ CORS(app)  # Enable CORS for frontend
 BASE_DIR = Path(__file__).parent.parent
 NER_MODEL_PATH = BASE_DIR / "models" / "mini_cybert_final"
 MLM_MODEL_PATH = BASE_DIR / "models" / "mlm_final"
+VOCABULARY_PATH = BASE_DIR / "datasets" / "cyber" / "entity_vocabulary.json"
 
 # Model max length (BERT limit)
 NER_MAX_LENGTH = 512
@@ -38,6 +40,10 @@ ner_tokenizer = None
 ner_model = None
 ner_loaded = False
 mlm_loaded = False
+
+# Dataset vocabulary (loaded from cyberner_clean.csv)
+dataset_vocabulary = None
+vocab_loaded = False
 
 
 def split_into_sentences(text):
@@ -193,9 +199,210 @@ def extract_entities_from_segment(segment_text, tokenizer, model):
     return _words_to_entities(words)
 
 
+def enhance_with_keywords(text, existing_entities):
+    """
+    Enhance NER results with dataset vocabulary lookup.
+    This catches cybersecurity terms that the model might miss.
+    Uses vocabulary extracted from cyberner_clean.csv dataset.
+    """
+    import re
+    import sys
+    
+    if not vocab_loaded or dataset_vocabulary is None:
+        print("[KEYWORD ENHANCE] Vocabulary not loaded, using hardcoded fallback", flush=True)
+        return enhance_with_hardcoded_keywords(text, existing_entities)
+    
+    print(f"[DATASET ENHANCE] Input text: {text[:100]}...", flush=True)
+    print(f"[DATASET ENHANCE] Existing entities: {len(existing_entities)}", flush=True)
+    sys.stdout.flush()
+    
+    # Track existing entity spans to avoid duplicates
+    existing_spans = set()
+    for e in existing_entities:
+        existing_spans.add((e['start'], e['end']))
+    
+    enhanced = list(existing_entities)
+    added_count = 0
+    
+    # First, try multi-word entities (longer matches are more specific)
+    multi_word = dataset_vocabulary.get('multi_word', {})
+    for entity_phrase, entity_data in multi_word.items():
+        entity_type = entity_data['entity_type']
+        
+        # Search for phrase (case insensitive, word boundary)
+        pattern = re.compile(r'\b' + re.escape(entity_phrase) + r'\b', re.IGNORECASE)
+        
+        for match in pattern.finditer(text):
+            start = match.start()
+            end = match.end()
+            
+            # Check if this span overlaps with existing entities
+            overlaps = False
+            for e_start, e_end in existing_spans:
+                if not (end <= e_start or start >= e_end):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                word = text[start:end]
+                enhanced.append({
+                    'word': word,
+                    'entity_type': entity_type,
+                    'start': start,
+                    'end': end,
+                    'source': 'dataset_multi_word'
+                })
+                existing_spans.add((start, end))
+                added_count += 1
+                print(f"[DATASET ENHANCE] Added multi-word: {word} -> {entity_type}", flush=True)
+    
+    # Then, try single words
+    single_words = dataset_vocabulary.get('single_words', {})
+    
+    # Extract words from text using the same logic as _build_words
+    words_in_text = []
+    i = 0
+    while i < len(text):
+        if _is_token_char(text[i]):
+            start = i
+            while i < len(text) and _is_token_char(text[i]):
+                i += 1
+            word_text = text[start:i]
+            words_in_text.append({
+                'text': word_text,
+                'start': start,
+                'end': i
+            })
+        else:
+            i += 1
+    
+    # Check each word against vocabulary
+    for word_info in words_in_text:
+        word_lower = word_info['text'].lower()
+        start = word_info['start']
+        end = word_info['end']
+        
+        # Skip if too short
+        if len(word_lower) <= 1:
+            continue
+        
+        # Check vocabulary
+        if word_lower in single_words:
+            entity_data = single_words[word_lower]
+            entity_type = entity_data['entity_type']
+            
+            # Check if this span overlaps with existing entities
+            overlaps = False
+            for e_start, e_end in existing_spans:
+                if not (end <= e_start or start >= e_end):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                enhanced.append({
+                    'word': word_info['text'],
+                    'entity_type': entity_type,
+                    'start': start,
+                    'end': end,
+                    'source': 'dataset_single_word'
+                })
+                existing_spans.add((start, end))
+                added_count += 1
+                print(f"[DATASET ENHANCE] Added single word: {word_info['text']} -> {entity_type}", flush=True)
+    
+    print(f"[DATASET ENHANCE] Added {added_count} new entities from dataset", flush=True)
+    print(f"[DATASET ENHANCE] Total entities: {len(enhanced)}", flush=True)
+    sys.stdout.flush()
+    return enhanced
+
+
+def enhance_with_hardcoded_keywords(text, existing_entities):
+    """
+    Fallback: Enhance with hardcoded keywords if vocabulary file is not available.
+    This is the original implementation.
+    """
+    import re
+    import sys
+    
+    print(f"[KEYWORD ENHANCE] Input text: {text}", flush=True)
+    print(f"[KEYWORD ENHANCE] Existing entities: {len(existing_entities)}", flush=True)
+    sys.stdout.flush()
+    
+    # Define keyword patterns and their entity types
+    keyword_patterns = {
+        'MALWARE': [
+            'ransomware', 'trojan', 'backdoor', 'rootkit', 'spyware', 'adware',
+            'worm', 'virus', 'conti', 'ryuk', 'maze', 'wannacry', 'petya',
+            'notpetya', 'cryptolocker', 'trickbot', 'emotet', 'dridex',
+            'lockbit', 'blackcat', 'alphv', 'revil', 'sodinokibi', 'malware'
+        ],
+        'VULNERABILITY': [
+            'vulnerability', 'vulnerabilities', 'exploit', 'zero-day',
+            'zeroday', 'security flaw', 'security issue'
+        ],
+        'THREAT_ACTOR': [
+            'apt28', 'apt29', 'apt32', 'apt40', 'fancy bear', 'cozy bear',
+            'lazarus', 'sandworm', 'equation group', 'carbanak', 'fin7', 'fin8'
+        ],
+        'METHOD': [
+            'phishing', 'spear-phishing', 'spear phishing', 'social engineering', 
+            'brute force', 'credential stuffing', 'sql injection', 'xss', 'ddos', 'dos',
+            'man-in-the-middle', 'mitm', 'privilege escalation', 'lateral movement'
+        ],
+        'TOOL': [
+            'cobalt strike', 'metasploit', 'mimikatz', 'powershell', 'psexec',
+            'nmap', 'burp suite', 'wireshark', 'hydra', 'john the ripper'
+        ]
+    }
+    
+    # Track existing entity spans to avoid duplicates
+    existing_spans = set()
+    for e in existing_entities:
+        existing_spans.add((e['start'], e['end']))
+    
+    enhanced = list(existing_entities)
+    added_count = 0
+    
+    for entity_type, keywords in keyword_patterns.items():
+        for keyword in keywords:
+            # Use word boundary matching for better accuracy
+            # Case insensitive search
+            pattern = re.compile(r'\b' + re.escape(keyword) + r'\b', re.IGNORECASE)
+            
+            for match in pattern.finditer(text):
+                start = match.start()
+                end = match.end()
+                
+                # Check if this span overlaps with existing entities
+                overlaps = False
+                for e_start, e_end in existing_spans:
+                    if not (end <= e_start or start >= e_end):
+                        overlaps = True
+                        break
+                
+                if not overlaps:
+                    # Add the keyword-detected entity
+                    word = text[start:end]
+                    enhanced.append({
+                        'word': word,
+                        'entity_type': entity_type,
+                        'start': start,
+                        'end': end
+                    })
+                    existing_spans.add((start, end))
+                    added_count += 1
+                    print(f"[KEYWORD ENHANCE] Added: {word} -> {entity_type}", flush=True)
+    
+    print(f"[KEYWORD ENHANCE] Added {added_count} new entities", flush=True)
+    print(f"[KEYWORD ENHANCE] Total entities: {len(enhanced)}", flush=True)
+    sys.stdout.flush()
+    return enhanced
+
+
 def run_ner_on_text(text, tokenizer, model):
     """
     Split text into sentences, run NER on each, combine with global offsets.
+    Then enhance with keyword-based detection.
     Returns (per_sentence_list, combined_entities).
     """
     sentences_with_offsets = split_into_sentences(text)
@@ -234,13 +441,48 @@ def run_ner_on_text(text, tokenizer, model):
             ],
         })
 
+    # Enhance combined entities with keyword-based detection
+    try:
+        print(f"[DEBUG] About to enhance. Current count: {len(combined)}")
+        combined = enhance_with_keywords(text, combined)
+        print(f"[DEBUG] After enhance. New count: {len(combined)}")
+    except Exception as e:
+        print(f"[ERROR] Keyword enhancement failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Sort by start position
+    combined.sort(key=lambda x: x['start'])
+
     return per_sentence, combined
 
 
 def load_models():
-    """Load both NER and MLM models"""
+    """Load both NER and MLM models, and dataset vocabulary"""
     global ner_pipeline, mlm_pipeline, ner_loaded, mlm_loaded
     global ner_tokenizer, ner_model  # Store separately for custom processing
+    global dataset_vocabulary, vocab_loaded
+    
+    # Load dataset vocabulary
+    try:
+        print(f"Loading dataset vocabulary from: {VOCABULARY_PATH}")
+        if VOCABULARY_PATH.exists():
+            with open(VOCABULARY_PATH, 'r', encoding='utf-8') as f:
+                dataset_vocabulary = json.load(f)
+            
+            stats = dataset_vocabulary.get('statistics', {})
+            print(f"  Single words: {stats.get('filtered_single_words', 0):,}")
+            print(f"  Multi-word entities: {stats.get('filtered_multi_word', 0):,}")
+            vocab_loaded = True
+            print("[SUCCESS] Dataset vocabulary loaded successfully!")
+        else:
+            print(f"[WARNING] Vocabulary file not found at {VOCABULARY_PATH}")
+            print("[WARNING] Will use hardcoded keywords as fallback")
+            vocab_loaded = False
+    except Exception as e:
+        print(f"[ERROR] Failed to load vocabulary: {e}")
+        print("[WARNING] Will use hardcoded keywords as fallback")
+        vocab_loaded = False
     
     # Load NER model - using direct model/tokenizer instead of pipeline
     try:
@@ -248,9 +490,9 @@ def load_models():
         ner_tokenizer = AutoTokenizer.from_pretrained(str(NER_MODEL_PATH))
         ner_model = AutoModelForTokenClassification.from_pretrained(str(NER_MODEL_PATH))
         ner_loaded = True
-        print("NER model loaded successfully!")
+        print("[SUCCESS] NER model loaded successfully!")
     except Exception as e:
-        print(f"Error loading NER model: {e}")
+        print(f"[ERROR] loading NER model: {e}")
         ner_loaded = False
     
     # Load MLM model
@@ -264,9 +506,9 @@ def load_models():
             tokenizer=tokenizer
         )
         mlm_loaded = True
-        print("MLM model loaded successfully!")
+        print("[SUCCESS] MLM model loaded successfully!")
     except Exception as e:
-        print(f"Error loading MLM model: {e}")
+        print(f"[ERROR] loading MLM model: {e}")
         mlm_loaded = False
     
     return ner_loaded or mlm_loaded
@@ -274,26 +516,43 @@ def load_models():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({
+    health_info = {
         'status': 'healthy',
         'ner_loaded': ner_loaded,
-        'mlm_loaded': mlm_loaded
-    })
+        'mlm_loaded': mlm_loaded,
+        'vocabulary_loaded': vocab_loaded
+    }
+    
+    if vocab_loaded and dataset_vocabulary:
+        stats = dataset_vocabulary.get('statistics', {})
+        health_info['vocabulary_stats'] = {
+            'single_words': stats.get('filtered_single_words', 0),
+            'multi_word_entities': stats.get('filtered_multi_word', 0),
+            'total_entity_types': len(set(
+                [v['entity_type'] for v in dataset_vocabulary.get('single_words', {}).values()] +
+                [v['entity_type'] for v in dataset_vocabulary.get('multi_word', {}).values()]
+            ))
+        }
+    
+    return jsonify(health_info)
 
 @app.route('/api/ner/analyze', methods=['POST'])
 def analyze_ner():
     """Analyze text: split into sentences, run NER per sentence, return per-sentence + combined entities."""
     try:
+        print("[NER ENDPOINT] Request received")
         if not ner_loaded:
             return jsonify({'error': 'NER model not loaded'}), 500
 
         data = request.json
         text = data.get('text', '')
+        print(f"[NER ENDPOINT] Text: {text}")
 
         if not text:
             return jsonify({'error': 'No text provided'}), 400
 
         per_sentence, combined = run_ner_on_text(text, ner_tokenizer, ner_model)
+        print(f"[NER ENDPOINT] Combined entities count: {len(combined)}")
 
         response = {
             'text': text,

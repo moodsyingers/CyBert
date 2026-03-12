@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import './App.css';
 import Header from './components/Header';
 
@@ -11,13 +11,24 @@ function App() {
 
   const API_URL = 'http://localhost:5001';
 
+  useEffect(() => {
+    console.log('🚀 App Component Mounted!');
+    console.log('API URL:', API_URL);
+  }, []);
+
   const handleAnalyze = async () => {
+    console.log('=== ANALYZE BUTTON CLICKED ===');
+    console.log('Input Text:', inputText);
+    console.log('Selected Model:', selectedModel);
+
     if (!inputText.trim()) {
+      console.log('❌ Error: Empty text');
       setError('Please enter some text');
       return;
     }
 
     if (selectedModel === 'mlm' && !inputText.includes('[MASK]')) {
+      console.log('❌ Error: MLM requires [MASK] token');
       setError('MLM model requires [MASK] token in the text');
       return;
     }
@@ -25,6 +36,7 @@ function App() {
     setLoading(true);
     setError(null);
     setResult(null);
+    console.log('🔄 Loading started...');
 
     try {
       let endpoint = '';
@@ -38,6 +50,9 @@ function App() {
         requestBody = { text: inputText };
       }
 
+      console.log('📡 Making request to:', endpoint);
+      console.log('📦 Request body:', requestBody);
+
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -46,16 +61,73 @@ function App() {
         body: JSON.stringify(requestBody),
       });
 
+      console.log('📨 Response status:', response.status);
+
       if (!response.ok) {
+        console.log('❌ Response not OK');
         throw new Error('Analysis failed');
       }
 
       const data = await response.json();
+      console.log('✅ Response data:', data);
+      
+      // Filter out two-letter words from NER results
+      if (selectedModel === 'ner' && data.entities) {
+        // First filter by length
+        data.entities = data.entities.filter(entity => {
+          const word = (entity.word || '').trim().replace(/[.,;:!?]/g, '');
+          return word.length > 2;
+        });
+        
+        // Remove duplicates - keep only unique word + entity_type combinations
+        const seen = new Set();
+        data.entities = data.entities.filter(entity => {
+          const key = `${entity.word.toLowerCase().trim()}|${entity.entity_type}`;
+          if (seen.has(key)) {
+            console.log('🔄 Removing duplicate:', entity.word, entity.entity_type);
+            return false;
+          }
+          seen.add(key);
+          return true;
+        });
+        
+        data.entity_count = data.entities.length;
+        console.log('✅ After deduplication, entity count:', data.entity_count);
+        
+        // Also filter sentence entities
+        if (data.sentences) {
+          data.sentences = data.sentences.map(sent => ({
+            ...sent,
+            entities: (sent.entities || []).filter(entity => {
+              const word = (entity.word || '').trim().replace(/[.,;:!?]/g, '');
+              return word.length > 2;
+            })
+          }));
+        }
+      }
+      
+      // Filter out two-letter words and duplicates from MLM predictions
+      if (selectedModel === 'mlm' && data.predictions) {
+        // Filter by length
+        data.predictions = data.predictions.filter(word => {
+          const cleanWord = (word || '').trim().replace(/[.,;:!?]/g, '');
+          return cleanWord.length > 2;
+        });
+        
+        // Remove duplicate predictions (case-insensitive)
+        const uniquePredictions = [...new Set(data.predictions.map(w => w.toLowerCase()))];
+        data.predictions = uniquePredictions;
+        console.log('✅ Unique MLM predictions:', data.predictions.length);
+      }
+      
+      console.log('✅ Setting result state');
       setResult(data);
     } catch (err) {
+      console.error('❌ Error occurred:', err);
       setError(err.message);
     } finally {
       setLoading(false);
+      console.log('✅ Loading finished');
     }
   };
 
@@ -111,7 +183,10 @@ function App() {
                   type="radio"
                   value="ner"
                   checked={selectedModel === 'ner'}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  onChange={(e) => {
+                    console.log('📝 Model changed to:', e.target.value);
+                    setSelectedModel(e.target.value);
+                  }}
                 />
                 <span className="radio-text">
                   <strong>NER Model</strong> - Extract cybersecurity entities
@@ -123,7 +198,10 @@ function App() {
                   type="radio"
                   value="mlm"
                   checked={selectedModel === 'mlm'}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  onChange={(e) => {
+                    console.log('📝 Model changed to:', e.target.value);
+                    setSelectedModel(e.target.value);
+                  }}
                 />
                 <span className="radio-text">
                   <strong>MLM Model</strong> - Predict masked words (use [MASK])
@@ -167,31 +245,9 @@ function App() {
             {result && (
               <div className="results-section">
                 {selectedModel === 'ner' ? (
-                  // NER Results (long text split into sentences, then combined)
+                  // NER Results - Show only combined entities
                   <>
-                    {result.sentences && result.sentences.length > 1 && (
-                      <div className="sentences-breakdown">
-                        <h4>By sentence ({result.sentences.length} sentences)</h4>
-                        {result.sentences.map((sent, idx) => (
-                          <div key={idx} className="sentence-block">
-                            <span className="sentence-label">Sentence {idx + 1}:</span>
-                            <span className="sentence-text">{sent.sentence.length > 100 ? sent.sentence.slice(0, 100) + '...' : sent.sentence}</span>
-                            {sent.entities && sent.entities.length > 0 ? (
-                              <div className="sentence-entities">
-                                {sent.entities.map((e, i) => (
-                                  <span key={i} className="sentence-entity-tag" style={{ backgroundColor: getEntityColor(e.entity_type) + '40' }}>
-                                    {e.word} ({e.entity_type})
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="no-entities">No entities</span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <h3>Combined entities ({result.entity_count})</h3>
+                    <h3>Detected Entities ({result.entity_count})</h3>
                     {result.entities && result.entities.length > 0 ? (
                       <div className="entities-grid">
                         {result.entities.map((entity, index) => (

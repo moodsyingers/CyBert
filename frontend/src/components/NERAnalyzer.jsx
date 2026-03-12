@@ -35,8 +35,32 @@ const NERAnalyzer = () => {
       }
 
       const data = await response.json();
-      setEntities(data.entities || []);
-      setSentences(data.sentences || []);
+      
+      console.log('Original entities:', data.entities);
+      
+      // Filter out two-letter words from entities (trim whitespace and punctuation before checking length)
+      const filteredEntities = (data.entities || []).filter(entity => {
+        const word = (entity.word || '').trim().replace(/[.,;:!?]/g, '');
+        const shouldKeep = word.length > 2;
+        if (!shouldKeep) {
+          console.log('Filtering out:', entity.word, 'length:', word.length);
+        }
+        return shouldKeep;
+      });
+      
+      console.log('Filtered entities:', filteredEntities);
+      
+      // Filter out two-letter words from sentence entities
+      const filteredSentences = (data.sentences || []).map(sent => ({
+        ...sent,
+        entities: (sent.entities || []).filter(entity => {
+          const word = (entity.word || '').trim().replace(/[.,;:!?]/g, '');
+          return word.length > 2;
+        })
+      }));
+      
+      setEntities(filteredEntities);
+      setSentences(filteredSentences);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -96,28 +120,6 @@ const NERAnalyzer = () => {
 
         {(entities.length > 0 || sentences.length > 0) && (
           <div className="results-section">
-            {sentences.length > 1 && (
-              <div className="sentences-breakdown">
-                <h3>By sentence ({sentences.length} sentences)</h3>
-                {sentences.map((sent, idx) => (
-                  <div key={idx} className="sentence-block">
-                    <span className="sentence-label">Sentence {idx + 1}:</span>
-                    <span className="sentence-text">{sent.sentence.length > 80 ? sent.sentence.slice(0, 80) + '...' : sent.sentence}</span>
-                    {sent.entities && sent.entities.length > 0 ? (
-                      <div className="sentence-entities">
-                        {sent.entities.map((e, i) => (
-                          <span key={i} className="sentence-entity-tag" style={{ backgroundColor: getEntityColor(e.entity_type) + '40' }}>
-                            {e.word} ({e.entity_type})
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="no-entities">No entities</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
             <h2>Combined entities ({entities.length})</h2>
             
             <div className="entities-list">
